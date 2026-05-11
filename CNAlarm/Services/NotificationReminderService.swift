@@ -134,14 +134,14 @@ enum NotificationActionApplier {
             case .check, .snooze:
                 continue
             case .skip:
-                guard !existing.contains(where: { $0.dateKey == action.targetDateKey && $0.kind == .skipAlarm && $0.profileID == targetProfileID }) else {
+                guard !existing.contains(where: { $0.dateKey == action.targetDateKey && $0.kind == .skipAlarm && $0.profileID == nil }) else {
                     continue
                 }
                 context.insert(
                     CalendarException(
                         dateKey: action.targetDateKey,
                         kind: .skipAlarm,
-                        profileID: targetProfileID,
+                        profileID: nil,
                         note: "由提醒快捷操作创建"
                     )
                 )

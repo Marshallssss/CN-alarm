@@ -71,7 +71,7 @@ struct AlarmScheduleResolver {
         exceptions: [CalendarException]
     ) -> Bool {
         let key = calendar.startOfDayKey(for: date)
-        if exceptions.contains(where: { $0.dateKey == key && $0.profileID == profile.id && $0.kind == .skipAlarm }) {
+        if exceptions.contains(where: { $0.dateKey == key && ($0.profileID == profile.id || $0.profileID == nil) && $0.kind == .skipAlarm }) {
             return false
         }
         if profile.followsSmartWorkday {

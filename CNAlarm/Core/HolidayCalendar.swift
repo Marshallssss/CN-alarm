@@ -37,7 +37,7 @@ struct HolidayCalendar: Hashable, Codable {
         mergedCompWorkdays.merge(compWorkdays) { _, current in current }
 
         var seenPeriods: Set<String> = []
-        let mergedPeriods = (fallback.periods + periods).filter { period in
+        let mergedPeriods = (periods + fallback.periods).filter { period in
             seenPeriods.insert("\(period.name)-\(period.startKey)").inserted
         }
 
