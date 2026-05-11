@@ -46,7 +46,7 @@ struct ReminderCenterView: View {
                     Text("从首页日历点击日期即可添加或修改特殊安排。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    ForEach(exceptions) { item in
+                    ForEach(visibleExceptions) { item in
                         HStack {
                             VStack(alignment: .leading) {
                                 Text(item.dateKey)
@@ -62,12 +62,14 @@ struct ReminderCenterView: View {
                         }
                     }
                     .onDelete { offsets in
-                        offsets.map { exceptions[$0] }.forEach(modelContext.delete)
+                        offsets.map { visibleExceptions[$0] }.forEach(modelContext.delete)
                     }
                 }
             }
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar(.hidden, for: .navigationBar)
+            .contentMargins(.top, 0, for: .scrollContent)
         }
     }
 
@@ -84,6 +86,23 @@ struct ReminderCenterView: View {
             .values
             .flatMap { $0.sorted { $0.fireDate < $1.fireDate }.prefix(2) }
             .sorted { $0.fireDate < $1.fireDate }
+    }
+
+    private var visibleExceptions: [CalendarException] {
+        let now = Date()
+        let calendar = Calendar.chinaAlarm
+        let todayKey = calendar.startOfDayKey(for: now)
+        return exceptions
+            .filter { exception in
+                CalendarExceptionVisibility.isVisible(exception, now: now, calendar: calendar, todayKey: todayKey)
+            }
+            .sorted { lhs, rhs in
+                if lhs.dateKey != rhs.dateKey { return lhs.dateKey < rhs.dateKey }
+                let lhsTime = ClockTime(hour: lhs.hour, minute: lhs.minute)
+                let rhsTime = ClockTime(hour: rhs.hour, minute: rhs.minute)
+                if lhsTime != rhsTime { return lhsTime < rhsTime }
+                return lhs.createdAt < rhs.createdAt
+            }
     }
 
     private func generateReminderEvents() {
@@ -109,6 +128,25 @@ struct ReminderCenterView: View {
                 reminderStatus = "已生成应用内提醒；系统通知注册失败：\(error.localizedDescription)"
             }
         }
+    }
+}
+
+enum CalendarExceptionVisibility {
+    static func isVisible(
+        _ exception: CalendarException,
+        now: Date,
+        calendar: Calendar = .chinaAlarm,
+        todayKey: String? = nil
+    ) -> Bool {
+        let resolvedTodayKey = todayKey ?? calendar.startOfDayKey(for: now)
+        if exception.dateKey > resolvedTodayKey { return true }
+        guard exception.dateKey == resolvedTodayKey else { return false }
+        guard [.extraAlarm, .moveComboDeadline, .childTime].contains(exception.kind),
+              let fireDate = calendar.date(from: exception.dateKey, hour: exception.hour, minute: exception.minute)
+        else {
+            return true
+        }
+        return fireDate >= now
     }
 }
 

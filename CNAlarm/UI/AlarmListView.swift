@@ -11,15 +11,18 @@ struct AlarmListView: View {
     @State private var syncStatus: String?
     @State private var selectedDate: Date?
     @State private var draftProfile: AlarmProfile?
-    @State private var showingFuturePreview = false
+    @State private var futurePreviewSnapshot: FuturePreviewSnapshot?
     @State private var pendingFuturePreviewDate: Date?
+    private let futurePreviewDayCount = 92
 
     var body: some View {
         NavigationStack {
             List {
                 Section {
-                    MainPageTitle("中国调休闹铃")
-                        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 2, trailing: 16))
+                    MainPageHeader("中国调休闹铃") {
+                        addAlarmMenu
+                    }
+                        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 8, trailing: 16))
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)
                 }
@@ -39,7 +42,9 @@ struct AlarmListView: View {
                         exceptions: exceptions,
                         minimumHeight: 250,
                         onSelectDate: { selectedDate = $0 },
-                        onFuturePreview: { showingFuturePreview = true }
+                        onFuturePreview: {
+                            futurePreviewSnapshot = FuturePreviewSnapshot(monthGroups: makeFuturePreviewGroups())
+                        }
                     )
                         .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
                         .listRowBackground(Color.clear)
@@ -82,25 +87,8 @@ struct AlarmListView: View {
             }
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button {
-                            draftProfile = AlarmProfile.defaultSingle()
-                        } label: {
-                            Label("普通闹铃", systemImage: "alarm")
-                        }
-                        Button {
-                            draftProfile = AlarmProfile.defaultCombo(template: templates.first)
-                        } label: {
-                            Label("闹铃组合", systemImage: "square.stack.3d.up")
-                        }
-                    } label: {
-                        Image(systemName: "plus.circle.fill")
-                    }
-                    .accessibilityLabel("添加闹铃")
-                }
-            }
+            .toolbar(.hidden, for: .navigationBar)
+            .contentMargins(.top, 0, for: .scrollContent)
             .sheet(item: selectedCalendarDateBinding) { selection in
                 CalendarDateActionSheet(
                     date: selection.date,
@@ -110,14 +98,13 @@ struct AlarmListView: View {
                     onChanged: scheduleAfterMutation
                 )
             }
-            .sheet(isPresented: $showingFuturePreview, onDismiss: presentPendingFuturePreviewDate) {
+            .sheet(item: $futurePreviewSnapshot, onDismiss: presentPendingFuturePreviewDate) { snapshot in
                 FuturePreviewCalendarSheet(
-                    dates: futurePreviewDates,
-                    instances: futurePreviewInstances,
+                    monthGroups: snapshot.monthGroups,
                     exceptions: exceptions
                 ) { date in
                     pendingFuturePreviewDate = date
-                    showingFuturePreview = false
+                    futurePreviewSnapshot = nil
                 }
             }
             .sheet(item: $draftProfile) { profile in
@@ -137,6 +124,29 @@ struct AlarmListView: View {
                 }
             }
         }
+    }
+
+    private var addAlarmMenu: some View {
+        Menu {
+            Button {
+                draftProfile = AlarmProfile.defaultSingle()
+            } label: {
+                Label("普通闹铃", systemImage: "alarm")
+            }
+            Button {
+                draftProfile = AlarmProfile.defaultCombo(template: templates.first)
+            } label: {
+                Label("闹铃组合", systemImage: "square.stack.3d.up")
+            }
+        } label: {
+            Image(systemName: "plus.circle.fill")
+                .font(.title2)
+                .foregroundStyle(.orange)
+                .frame(width: 46, height: 46)
+                .background(Color(uiColor: .secondarySystemGroupedBackground))
+                .clipShape(Circle())
+        }
+        .accessibilityLabel("添加闹铃")
     }
 
     private var upcomingInstances: [ScheduledAlarmInstance] {
@@ -193,12 +203,12 @@ struct AlarmListView: View {
             companyRules: companyRules,
             exceptions: exceptions,
             from: futurePreviewStartDate,
-            days: 28
+            days: futurePreviewDayCount
         )
     }
 
     private var futurePreviewDates: [Date] {
-        Calendar.chinaAlarm.dateRange(from: futurePreviewStartDate, days: 28)
+        Calendar.chinaAlarm.dateRange(from: futurePreviewStartDate, days: futurePreviewDayCount)
     }
 
     private var futurePreviewStartDate: Date {
@@ -268,6 +278,30 @@ struct AlarmListView: View {
         selectedDate = date
     }
 
+    private func makeFuturePreviewGroups() -> [FuturePreviewMonthGroup] {
+        let calendar = Calendar.chinaAlarm
+        let dates = futurePreviewDates
+        let instances = futurePreviewInstances
+        let datesByMonth = Dictionary(grouping: dates) { date in
+            let components = calendar.dateComponents([.year, .month], from: date)
+            return calendar.date(from: components).map(calendar.startOfDay(for:)) ?? calendar.startOfDay(for: date)
+        }
+        let instancesByDate = Dictionary(grouping: instances) { calendar.startOfDayKey(for: $0.fireDate) }
+
+        return datesByMonth.map { monthStart, monthDates in
+            let sortedDates = monthDates.sorted()
+            let monthInstances = sortedDates.flatMap { date in
+                instancesByDate[calendar.startOfDayKey(for: date)] ?? []
+            }
+            return FuturePreviewMonthGroup(
+                monthStart: monthStart,
+                dates: sortedDates,
+                instances: monthInstances
+            )
+        }
+        .sorted { $0.monthStart < $1.monthStart }
+    }
+
     private func removeExceptions(on dateKey: String, kinds: [CalendarExceptionKind]) {
         for exception in exceptions where exception.dateKey == dateKey && kinds.contains(exception.kind) {
             modelContext.delete(exception)
@@ -281,6 +315,11 @@ struct AlarmListView: View {
             await syncSystemAlarms()
         }
     }
+}
+
+private struct FuturePreviewSnapshot: Identifiable {
+    let id = UUID()
+    var monthGroups: [FuturePreviewMonthGroup]
 }
 
 private struct AlarmRow: View {
@@ -383,27 +422,38 @@ private struct UpcomingDayRow: View {
 
 private struct FuturePreviewCalendarSheet: View {
     @Environment(\.dismiss) private var dismiss
-    var dates: [Date]
-    var instances: [ScheduledAlarmInstance]
+    var monthGroups: [FuturePreviewMonthGroup]
     var exceptions: [CalendarException]
     var onSelectDate: (Date) -> Void
 
     var body: some View {
         NavigationStack {
-            List {
-                Section {
-                    AlarmCalendarOverviewCard(
-                        title: "未来预览",
-                        dates: dates,
-                        instances: instances,
-                        exceptions: exceptions,
-                        minimumHeight: 330,
-                        onSelectDate: onSelectDate
-                    )
-                    .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
-                    .listRowBackground(Color.clear)
+            ScrollView {
+                LazyVStack(spacing: 16) {
+                    Text("近 3 个月会按月份分开显示，点击任意日期可继续调整当天闹铃。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(16)
+                        .background(Color(uiColor: .secondarySystemGroupedBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                    ForEach(monthGroups) { group in
+                        AlarmCalendarOverviewCard(
+                            title: group.title,
+                            dates: group.dates,
+                            instances: group.instances,
+                            exceptions: exceptions,
+                            minimumHeight: group.preferredCardHeight,
+                            alignsToWeekday: true,
+                            onSelectDate: onSelectDate
+                        )
+                    }
                 }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 16)
             }
+            .background(Color(uiColor: .systemGroupedBackground))
             .navigationTitle("未来预览")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -417,12 +467,34 @@ private struct FuturePreviewCalendarSheet: View {
     }
 }
 
+private struct FuturePreviewMonthGroup: Identifiable {
+    var monthStart: Date
+    var dates: [Date]
+    var instances: [ScheduledAlarmInstance]
+
+    private var calendar: Calendar { .chinaAlarm }
+
+    var id: String { DateKey(date: monthStart).rawValue }
+
+    var title: String {
+        monthStart.formatted(.dateTime.year().month(.wide).locale(Locale(identifier: "zh_CN")))
+    }
+
+    var preferredCardHeight: CGFloat {
+        let leadingBlanks = dates.first.map { (calendar.weekdayNumber(for: $0) + 5) % 7 } ?? 0
+        let rowCount = Int(ceil(Double(leadingBlanks + dates.count) / 7.0))
+        let gridHeight = 20 + CGFloat(rowCount) * 52 + CGFloat(max(rowCount - 1, 0)) * 8
+        return 18 + 22 + 14 + gridHeight + 12 + 24 + 18
+    }
+}
+
 private struct AlarmCalendarOverviewCard: View {
     var title: String
     var dates: [Date]
     var instances: [ScheduledAlarmInstance]
     var exceptions: [CalendarException]
     var minimumHeight: CGFloat
+    var alignsToWeekday = false
     var onSelectDate: (Date) -> Void
     var onFuturePreview: (() -> Void)? = nil
 
@@ -432,6 +504,11 @@ private struct AlarmCalendarOverviewCard: View {
     private let palette: [Color] = [.orange, .indigo, .teal, .pink, .blue, .green, .purple, .mint]
 
     var body: some View {
+        let instancesByDate = self.instancesByDate
+        let exceptionKindsByDate = self.exceptionKindsByDate
+        let colorMap = self.colorMap
+        let legendItems = self.legendItems
+
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .firstTextBaseline) {
                 Text(title)
@@ -450,6 +527,11 @@ private struct AlarmCalendarOverviewCard: View {
                         .frame(maxWidth: .infinity)
                 }
 
+                ForEach(0..<leadingBlankCount, id: \.self) { _ in
+                    Color.clear
+                        .frame(maxWidth: .infinity, minHeight: 52)
+                }
+
                 ForEach(dates, id: \.self) { date in
                     AlarmDayCell(
                         date: date,
@@ -464,6 +546,7 @@ private struct AlarmCalendarOverviewCard: View {
 
             if !legendItems.isEmpty {
                 FlowLegend(items: legendItems)
+                    .frame(height: 22)
             }
 
             if let onFuturePreview {
@@ -503,6 +586,11 @@ private struct AlarmCalendarOverviewCard: View {
         }
     }
 
+    private var leadingBlankCount: Int {
+        guard alignsToWeekday, let firstDate = dates.first else { return 0 }
+        return (calendar.weekdayNumber(for: firstDate) + 5) % 7
+    }
+
     private func monthDayText(_ date: Date) -> String {
         let components = calendar.dateComponents([.month, .day], from: date)
         return "\(components.month ?? 0)/\(components.day ?? 0)"
@@ -522,17 +610,30 @@ private struct AlarmDayCell: View {
     var body: some View {
         Button(action: onTap) {
             VStack(spacing: 5) {
-                Text("\(calendar.component(.day, from: date))")
-                    .font(.caption.weight(isToday ? .bold : .semibold))
-                    .monospacedDigit()
-                    .frame(width: 34, height: 34)
-                    .background(backgroundColor)
-                    .foregroundStyle(textColor)
-                    .overlay {
-                        Circle()
-                            .strokeBorder(strokeColor, lineWidth: isToday || isModified ? 2 : 1)
+                ZStack(alignment: .topTrailing) {
+                    Text("\(calendar.component(.day, from: date))")
+                        .font(.caption.weight(isToday ? .bold : .semibold))
+                        .monospacedDigit()
+                        .frame(width: 34, height: 34)
+                        .background(backgroundColor)
+                        .foregroundStyle(textColor)
+                        .overlay {
+                            Circle()
+                                .strokeBorder(strokeColor, lineWidth: isToday || isModified ? 2 : 1)
+                        }
+                        .clipShape(Circle())
+
+                    if isToday {
+                        Text("今")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 14, height: 14)
+                            .background(Color.orange)
+                            .clipShape(Circle())
+                            .offset(x: 4, y: -4)
                     }
-                    .clipShape(Circle())
+                }
+                .frame(width: 40, height: 38)
 
                 HStack(spacing: 2) {
                     if uniqueTimes.isEmpty {
@@ -571,6 +672,9 @@ private struct AlarmDayCell: View {
         if isModified {
             return modifiedColor.opacity(0.22)
         }
+        if isToday {
+            return Color.orange.opacity(0.18)
+        }
         guard let primaryColor else {
             return Color(uiColor: .tertiarySystemFill)
         }
@@ -580,6 +684,9 @@ private struct AlarmDayCell: View {
     private var strokeColor: Color {
         if isModified {
             return modifiedColor
+        }
+        if isToday {
+            return .orange
         }
         return primaryColor ?? Color.clear
     }
@@ -683,7 +790,7 @@ private struct CalendarDateActionSheet: View {
 
                     CalendarActionSection(title: "声音") {
                         Menu {
-                            Button("系统默认闹铃声") {
+                            Button("AlarmKit 系统默认") {
                                 temporarySoundIdentifier = SoundLibrary.alarmKitDefaultIdentifier
                             }
                             ForEach(sounds) { sound in
@@ -788,7 +895,7 @@ private struct CalendarDateActionSheet: View {
 
     private func soundName(for identifier: String) -> String {
         if identifier == SoundLibrary.alarmKitDefaultIdentifier {
-            return "系统默认闹铃声"
+            return "AlarmKit 系统默认"
         }
         return sounds.first { $0.filename == identifier }?.name ?? "未知铃声"
     }
@@ -816,7 +923,7 @@ private struct TemporaryAlarmExceptionEditor: View {
                         .foregroundStyle(.secondary)
                 }
                 Picker("铃声", selection: soundSelection) {
-                    Text("系统默认闹铃声").tag(SoundLibrary.alarmKitDefaultIdentifier)
+                    Text("AlarmKit 系统默认").tag(SoundLibrary.alarmKitDefaultIdentifier)
                     ForEach(sounds) { sound in
                         Text(sound.name).tag(sound.filename)
                     }
