@@ -179,6 +179,8 @@ final class AlarmProfile {
             mode: .combo,
             hour: 9,
             minute: 0,
+            allowSnooze: template?.allowSnooze ?? true,
+            soundIdentifier: template?.defaultSoundIdentifier ?? SoundLibrary.defaultSoundIdentifier,
             comboTemplateID: template?.id,
             comboAnchorMode: template?.anchorMode ?? .lastRingIsDeadline,
             comboOffsets: template?.offsets ?? [-10, -5, 0]

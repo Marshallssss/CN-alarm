@@ -7,6 +7,8 @@ struct AlarmEditorView: View {
     @Query(sort: \AlarmComboTemplate.createdAt) private var templates: [AlarmComboTemplate]
     @Query(sort: \SoundAsset.createdAt) private var sounds: [SoundAsset]
     @StateObject private var previewPlayer = SoundPreviewPlayer()
+    @State private var saveInvoked = false
+    @State private var comboEditorID = UUID()
     var isNewProfile = false
     var onSave: ((AlarmProfile) -> Void)?
     var onCancel: (() -> Void)?
@@ -49,7 +51,7 @@ struct AlarmEditorView: View {
             }
             Section("声音") {
                 Picker("铃声", selection: $profile.soundIdentifier) {
-                    Text("系统默认闹铃声").tag(SoundLibrary.alarmKitDefaultIdentifier)
+                    Text("AlarmKit 系统默认").tag(SoundLibrary.alarmKitDefaultIdentifier)
                     ForEach(sounds) { sound in
                         Text(sound.name).tag(sound.filename)
                     }
@@ -70,6 +72,7 @@ struct AlarmEditorView: View {
             if isNewProfile {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("取消") {
+                        saveInvoked = true
                         onCancel?()
                         dismiss()
                     }
@@ -77,28 +80,29 @@ struct AlarmEditorView: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button("保存") {
+                    saveInvoked = true
                     onSave?(profile)
                     dismiss()
                 }
                 .fontWeight(.semibold)
             }
         }
+        .onDisappear {
+            if !isNewProfile && !saveInvoked {
+                onSave?(profile)
+            }
+        }
     }
 
     private var comboSection: some View {
         Section("闹铃组合") {
-            Menu("套用模板") {
+            Picker("组合模板", selection: comboTemplateSelection) {
+                Text("自定义").tag(Optional<UUID>.none)
                 ForEach(templates) { template in
-                    Button(template.name) {
-                        profile.comboTemplateID = template.id
-                        profile.comboAnchorMode = template.anchorMode
-                        profile.comboOffsets = template.offsets
-                        if profile.soundIdentifier == SoundLibrary.alarmKitDefaultIdentifier {
-                            profile.soundIdentifier = template.defaultSoundIdentifier
-                        }
-                    }
+                    Text(template.name).tag(Optional(template.id))
                 }
             }
+            .disabled(templates.isEmpty)
 
             Picker("目标时间含义", selection: $profile.comboAnchorRaw) {
                 ForEach(ComboAnchorMode.allCases) { anchor in
@@ -110,7 +114,33 @@ struct AlarmEditorView: View {
             }, set: {
                 profile.comboOffsets = $0
             }))
+            .id(comboEditorID)
         }
+    }
+
+    private var comboTemplateSelection: Binding<UUID?> {
+        Binding(
+            get: { profile.comboTemplateID },
+            set: { templateID in
+                guard let templateID else {
+                    profile.comboTemplateID = nil
+                    comboEditorID = UUID()
+                    return
+                }
+                if let template = templates.first(where: { $0.id == templateID }) {
+                    applyTemplate(template)
+                }
+            }
+        )
+    }
+
+    private func applyTemplate(_ template: AlarmComboTemplate) {
+        profile.comboTemplateID = template.id
+        profile.comboAnchorMode = template.anchorMode
+        profile.comboOffsets = template.offsets
+        profile.soundIdentifier = template.defaultSoundIdentifier
+        profile.allowSnooze = template.allowSnooze
+        comboEditorID = UUID()
     }
 
     private var previewTimes: [ClockTime] {

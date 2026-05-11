@@ -64,6 +64,18 @@ final class CNAlarmCoreTests: XCTestCase {
         XCTAssertEqual(firstIsDeadline.map(\.displayText), ["09:00", "09:05", "09:10"])
     }
 
+    func testComboTimesSupportCustomNonUniformOffsets() {
+        let resolver = AlarmScheduleResolver(calendar: calendar)
+
+        let custom = resolver.comboTimes(
+            deadline: ClockTime(hour: 9, minute: 0),
+            anchorMode: .lastRingIsDeadline,
+            offsets: [-10, -8, -5, -3, -2, -1]
+        )
+
+        XCTAssertEqual(custom.map(\.displayText), ["08:50", "08:52", "08:55", "08:57", "08:58", "08:59"])
+    }
+
     func testComboTemplateCanBeCopiedAndOverriddenWithoutMutatingTemplate() throws {
         let template = AlarmComboTemplate(name: "三段叫醒", anchorMode: .firstRingIsDeadline, offsets: [0, 5, 10])
         let profile = AlarmProfile.defaultCombo(template: template)
@@ -72,6 +84,24 @@ final class CNAlarmCoreTests: XCTestCase {
 
         XCTAssertEqual(template.offsets, [0, 5, 10])
         XCTAssertEqual(profile.comboOffsets, [0, 3, 6, 9])
+    }
+
+    func testDefaultComboCopiesComplexTemplateSettings() throws {
+        let template = AlarmComboTemplate(
+            name: "密集叫醒",
+            anchorMode: .lastRingIsDeadline,
+            offsets: [-10, -8, -5, -3, -2, -1],
+            defaultSoundIdentifier: "cnalarm_bright_ping.wav",
+            allowSnooze: false
+        )
+
+        let profile = AlarmProfile.defaultCombo(template: template)
+
+        XCTAssertEqual(profile.comboTemplateID, template.id)
+        XCTAssertEqual(profile.comboAnchorMode, .lastRingIsDeadline)
+        XCTAssertEqual(profile.comboOffsets, [-10, -8, -5, -3, -2, -1])
+        XCTAssertEqual(profile.soundIdentifier, "cnalarm_bright_ping.wav")
+        XCTAssertFalse(profile.allowSnooze)
     }
 
     func testMoveWholeComboAndChildOverridesAffectScheduledInstances() throws {
@@ -139,6 +169,43 @@ final class CNAlarmCoreTests: XCTestCase {
         )
 
         XCTAssertTrue(instances.isEmpty)
+    }
+
+    func testAlarmSyncSignatureChangesWhenProfileTimeChanges() throws {
+        let profile = AlarmProfile(label: "午休起床", mode: .single, hour: 15, minute: 9)
+        let before = AlarmScheduleSyncSignature.make(
+            profiles: [profile],
+            templates: [],
+            holidayDatasets: [],
+            companyRules: [],
+            exceptions: []
+        )
+
+        profile.hour = 13
+        profile.minute = 57
+
+        let after = AlarmScheduleSyncSignature.make(
+            profiles: [profile],
+            templates: [],
+            holidayDatasets: [],
+            companyRules: [],
+            exceptions: []
+        )
+
+        XCTAssertNotEqual(before, after)
+    }
+
+    func testPastCalendarExceptionsAreHiddenAfterTheyAreNoLongerRelevant() throws {
+        let now = try XCTUnwrap(calendar.date(from: "2026-05-11", hour: 15, minute: 9))
+        let pastDay = CalendarException(dateKey: "2026-05-10", kind: .restDayOverride)
+        let pastExtraToday = CalendarException(dateKey: "2026-05-11", kind: .extraAlarm, hour: 13, minute: 57)
+        let futureExtraToday = CalendarException(dateKey: "2026-05-11", kind: .extraAlarm, hour: 16, minute: 0)
+        let futureDay = CalendarException(dateKey: "2026-05-12", kind: .restDayOverride)
+
+        XCTAssertFalse(CalendarExceptionVisibility.isVisible(pastDay, now: now, calendar: calendar))
+        XCTAssertFalse(CalendarExceptionVisibility.isVisible(pastExtraToday, now: now, calendar: calendar))
+        XCTAssertTrue(CalendarExceptionVisibility.isVisible(futureExtraToday, now: now, calendar: calendar))
+        XCTAssertTrue(CalendarExceptionVisibility.isVisible(futureDay, now: now, calendar: calendar))
     }
 
     func testExtraAlarmKeepsSelectedSound() throws {
