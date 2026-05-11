@@ -31,6 +31,10 @@ final class AlarmKitScheduler {
         try await AlarmManager.shared.requestAuthorization()
     }
 
+    var isAuthorized: Bool {
+        AlarmManager.shared.authorizationState == .authorized
+    }
+
     func schedule(instances: [ScheduledAlarmInstance]) async throws -> Int {
         let authorization = try await requestAuthorization()
         guard authorization == .authorized else {

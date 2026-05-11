@@ -110,7 +110,7 @@ struct SettingsView: View {
                     Button("导入铃声") {
                         importingSound = true
                     }
-                    Text("iOS 时钟 App 的完整铃声库没有公开读取接口；这里支持 AlarmKit 系统默认声、App 内置铃声和导入的 wav/caf/aiff。")
+                    Text("AlarmKit 只公开一个系统 default 声音，不公开 iOS 时钟 App 的完整铃声库；这里另外支持 App 内置铃声和导入的 wav/caf/aiff。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if let soundImportStatus {
@@ -151,6 +151,8 @@ struct SettingsView: View {
             }
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar(.hidden, for: .navigationBar)
+            .contentMargins(.top, 0, for: .scrollContent)
             .fileImporter(
                 isPresented: $importingSound,
                 allowedContentTypes: soundManager.supportedTypes,

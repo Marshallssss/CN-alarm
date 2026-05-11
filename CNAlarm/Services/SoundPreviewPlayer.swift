@@ -11,7 +11,7 @@ final class SoundPreviewPlayer: ObservableObject {
 
     func preview(identifier: String) {
         if identifier == SoundLibrary.alarmKitDefaultIdentifier {
-            status = "系统默认声由 AlarmKit 触发时播放，App 内不能直接预览。"
+            status = "AlarmKit 系统默认声只有一个 default，由系统闹铃触发时播放，App 内不能直接预览。"
             return
         }
         guard let url = manager.url(for: identifier) else {
