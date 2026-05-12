@@ -170,7 +170,7 @@ final class AlarmProfile {
     }
 
     static func defaultSingle() -> AlarmProfile {
-        AlarmProfile(label: "工作日闹铃", mode: .single, hour: 8, minute: 30)
+        AlarmProfile(label: "工作日闹铃", mode: .single, hour: 8, minute: 57)
     }
 
     static func defaultCombo(template: AlarmComboTemplate?) -> AlarmProfile {
@@ -229,7 +229,8 @@ final class AlarmComboTemplate {
     static func defaultTemplates() -> [AlarmComboTemplate] {
         [
             AlarmComboTemplate(name: "三段叫醒", anchorMode: .firstRingIsDeadline, offsets: [0, 5, 10]),
-            AlarmComboTemplate(name: "DDL 倒推", anchorMode: .lastRingIsDeadline, offsets: [-10, -5, 0])
+            AlarmComboTemplate(name: "DDL 倒推", anchorMode: .lastRingIsDeadline, offsets: [-10, -5, 0]),
+            AlarmComboTemplate(name: "密集叫醒", anchorMode: .lastRingIsDeadline, offsets: [-10, -8, -5, -3, -2, -1])
         ]
     }
 }

@@ -46,6 +46,124 @@ final class CNAlarmCoreTests: XCTestCase {
         XCTAssertTrue(resolver.isWorkday(secondSaturday, holidayCalendar: .empty, companyRules: [singleDayOffRule], exceptions: []))
     }
 
+    func testCalendarDayMarkersDistinguishHolidayMakeupOvertimeAndExtraRest() throws {
+        let resolver = WorkdayResolver(calendar: calendar)
+        let holiday = try XCTUnwrap(calendar.date(from: "2026-05-01"))
+        let holidaySaturday = try XCTUnwrap(calendar.date(from: "2026-05-02"))
+        let makeup = try XCTUnwrap(calendar.date(from: "2026-05-09"))
+        let overtime = try XCTUnwrap(calendar.date(from: "2026-05-30"))
+        let extraRest = try XCTUnwrap(calendar.date(from: "2026-07-13"))
+        let alternateSaturdayRule = CompanyCalendarRule(name: "大小周", kind: .alternateSaturday, anchorDate: holidaySaturday)
+        let lastSaturdayRule = CompanyCalendarRule(name: "月末周六", kind: .lastSaturdayOfMonth)
+        let singleDayOffRule = CompanyCalendarRule(name: "单休", kind: .singleDayOff)
+        let summerException = CalendarException(dateKey: "2026-07-13", kind: .restDayOverride, note: "设置生成：暑假休息")
+
+        XCTAssertEqual(
+            resolver.dayMarkers(for: holiday, holidayCalendar: .fixture2026, companyRules: [], exceptions: []).map(\.kind),
+            [.holidayRest]
+        )
+        XCTAssertEqual(
+            resolver.dayMarkers(for: makeup, holidayCalendar: .fixture2026, companyRules: [], exceptions: []).map(\.kind),
+            [.makeupWorkday]
+        )
+        XCTAssertEqual(
+            resolver.dayMarkers(for: holidaySaturday, holidayCalendar: .fixture2026, companyRules: [alternateSaturdayRule, singleDayOffRule], exceptions: []).map(\.kind),
+            [.holidayRest]
+        )
+        XCTAssertEqual(
+            resolver.dayMarkers(for: makeup, holidayCalendar: .fixture2026, companyRules: [singleDayOffRule], exceptions: []).map(\.kind),
+            [.makeupWorkday]
+        )
+        XCTAssertEqual(
+            resolver.dayMarkers(for: overtime, holidayCalendar: .empty, companyRules: [lastSaturdayRule], exceptions: []).map(\.kind),
+            [.companyWorkday]
+        )
+
+        let markers = resolver.dayMarkers(for: extraRest, holidayCalendar: .empty, companyRules: [], exceptions: [summerException])
+        XCTAssertEqual(markers.map(\.kind), [.extraRest])
+        XCTAssertEqual(markers.first?.title, "暑假休息")
+        XCTAssertEqual(CalendarDayMarkerKind.holidayRest.shortTitle, "假")
+        XCTAssertEqual(CalendarDayMarkerKind.extraRest.shortTitle, "休")
+    }
+
+    func testLeaveExceptionsAreGroupedIntoContinuousRanges() throws {
+        let exceptions = [
+            CalendarException(dateKey: "2026-01-20", kind: .restDayOverride, note: "设置生成：寒假休息"),
+            CalendarException(dateKey: "2026-01-21", kind: .restDayOverride, note: "设置生成：寒假休息"),
+            CalendarException(dateKey: "2026-02-01", kind: .restDayOverride, note: "设置生成：寒假休息"),
+            CalendarException(dateKey: "2026-07-30", kind: .restDayOverride, note: "休假：暑假"),
+            CalendarException(dateKey: "2026-07-31", kind: .restDayOverride, note: "休假：暑假"),
+            CalendarException(dateKey: "2026-08-01", kind: .restDayOverride, note: "休假：暑假"),
+            CalendarException(dateKey: "2026-08-02", kind: .skipAlarm, note: "休假：暑假")
+        ]
+
+        let ranges = CalendarExceptionRangeGrouper(calendar: calendar).leaveRanges(from: exceptions)
+
+        XCTAssertEqual(ranges.map(\.title), ["寒假休息", "寒假休息", "暑假"])
+        XCTAssertEqual(ranges.map(\.dateKeys), [
+            ["2026-01-20", "2026-01-21"],
+            ["2026-02-01"],
+            ["2026-07-30", "2026-07-31", "2026-08-01"]
+        ])
+    }
+
+    func testCrossWeekRestDaysExpandToWholeWeekPreviewRange() throws {
+        let exceptions = [
+            CalendarException(dateKey: "2026-07-30", kind: .restDayOverride, note: "休假：暑假"),
+            CalendarException(dateKey: "2026-07-31", kind: .restDayOverride, note: "休假：暑假"),
+            CalendarException(dateKey: "2026-08-01", kind: .restDayOverride, note: "休假：暑假"),
+            CalendarException(dateKey: "2026-08-02", kind: .restDayOverride, note: "休假：暑假"),
+            CalendarException(dateKey: "2026-08-03", kind: .restDayOverride, note: "休假：暑假")
+        ]
+
+        let ranges = CalendarExceptionRangeGrouper(calendar: calendar).restRanges(
+            holidayCalendar: .empty,
+            exceptions: exceptions
+        )
+
+        XCTAssertEqual(ranges.count, 1)
+        XCTAssertEqual(ranges.first?.title, "暑假")
+        XCTAssertEqual(ranges.first?.restDateKeys.first, "2026-07-30")
+        XCTAssertEqual(ranges.first?.restDateKeys.last, "2026-08-03")
+        XCTAssertEqual(ranges.first?.dateKeys.first, "2026-07-27")
+        XCTAssertEqual(ranges.first?.dateKeys.last, "2026-08-09")
+    }
+
+    func testRestRangesBridgeAcrossWeekendForMultiWeekLeave() throws {
+        let exceptions = [
+            CalendarException(dateKey: "2026-07-16", kind: .restDayOverride, note: "休假：年假"),
+            CalendarException(dateKey: "2026-07-17", kind: .restDayOverride, note: "休假：年假"),
+            CalendarException(dateKey: "2026-07-20", kind: .restDayOverride, note: "休假：年假")
+        ]
+
+        let ranges = CalendarExceptionRangeGrouper(calendar: calendar).restRanges(
+            holidayCalendar: .empty,
+            exceptions: exceptions
+        )
+
+        XCTAssertEqual(ranges.count, 1)
+        XCTAssertEqual(ranges.first?.title, "年假")
+        XCTAssertEqual(ranges.first?.restDateKeys.first, "2026-07-16")
+        XCTAssertEqual(ranges.first?.restDateKeys.last, "2026-07-20")
+        XCTAssertTrue(ranges.first?.restDateKeys.contains("2026-07-18") == true)
+        XCTAssertEqual(ranges.first?.dateKeys.first, "2026-07-13")
+        XCTAssertEqual(ranges.first?.dateKeys.last, "2026-07-26")
+    }
+
+    func testCrossWeekHolidayRestDaysExpandToWholeWeekPreviewRange() throws {
+        let ranges = CalendarExceptionRangeGrouper(calendar: calendar).restRanges(
+            holidayCalendar: .fixture2026,
+            exceptions: []
+        )
+
+        let nationalDay = try XCTUnwrap(ranges.first { $0.restDateKeys.contains("2026-10-01") })
+        XCTAssertEqual(nationalDay.title, "国庆节")
+        XCTAssertEqual(nationalDay.restDateKeys.first, "2026-10-01")
+        XCTAssertEqual(nationalDay.restDateKeys.last, "2026-10-07")
+        XCTAssertEqual(nationalDay.dateKeys.first, "2026-09-28")
+        XCTAssertEqual(nationalDay.dateKeys.last, "2026-10-11")
+    }
+
     func testComboTimesSupportBothDeadlineAnchors() {
         let resolver = AlarmScheduleResolver(calendar: calendar)
 
@@ -152,6 +270,34 @@ final class CNAlarmCoreTests: XCTestCase {
         XCTAssertTrue(drafts.contains(where: { $0.title.contains("端午节前 3 天") && $0.targetDateKey == "2026-06-19" }))
         XCTAssertTrue(drafts.contains(where: { $0.title == "明天调班上班" && $0.targetDateKey == "2026-09-20" }))
         XCTAssertTrue(drafts.contains(where: { $0.title == "明天调班上班" && $0.targetDateKey == "2026-10-10" }))
+    }
+
+    @MainActor
+    func testSeedDataCreatesDisabledDefaultAlarmsAndReusableTemplates() throws {
+        let schema = Schema([
+            AlarmProfile.self,
+            AlarmComboTemplate.self,
+            HolidayDataset.self,
+            ReminderRule.self,
+            SoundAsset.self
+        ])
+        let configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+        let container = try ModelContainer(for: schema, configurations: [configuration])
+        let context = container.mainContext
+
+        SeedDataService.seedIfNeeded(context: context)
+
+        let profiles = try context.fetch(FetchDescriptor<AlarmProfile>()).sorted { $0.createdAt < $1.createdAt }
+        let templates = try context.fetch(FetchDescriptor<AlarmComboTemplate>())
+
+        XCTAssertEqual(profiles.map(\.label), ["起床闹铃", "门禁打卡", "午休结束"])
+        XCTAssertEqual(profiles.map(\.isEnabled), [false, false, false])
+        XCTAssertEqual(profiles.map { ClockTime(hour: $0.hour, minute: $0.minute).displayText }, ["08:10", "08:57", "13:57"])
+        XCTAssertEqual(profiles.map(\.mode), [.combo, .single, .combo])
+        XCTAssertTrue(templates.contains { $0.name == "DDL 倒推" && $0.offsets == [-10, -5, 0] })
+        XCTAssertTrue(templates.contains { $0.name == "三段叫醒" && $0.offsets == [0, 5, 10] })
+        XCTAssertTrue(templates.contains { $0.name == "密集叫醒" && $0.offsets == [-10, -8, -5, -3, -2, -1] })
+        XCTAssertFalse(templates.contains { $0.name == "两段叫醒" })
     }
 
     func testResolverFiltersAlreadyElapsedInstancesOnStartDay() throws {
@@ -287,7 +433,7 @@ final class CNAlarmCoreTests: XCTestCase {
         NotificationActionApplier.applyPendingActions(context: context)
 
         let exceptions = try context.fetch(FetchDescriptor<CalendarException>())
-        XCTAssertTrue(exceptions.contains { $0.dateKey == "2026-05-09" && $0.kind == .skipAlarm && $0.profileID == profile.id })
+        XCTAssertTrue(exceptions.contains { $0.dateKey == "2026-05-09" && $0.kind == .skipAlarm && $0.profileID == nil })
         XCTAssertTrue(exceptions.contains { $0.dateKey == "2026-05-10" && $0.kind == .extraAlarm })
         XCTAssertTrue(PendingNotificationActionStore.pendingActions().isEmpty)
     }

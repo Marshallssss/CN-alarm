@@ -13,7 +13,6 @@ struct AlarmListView: View {
     @State private var draftProfile: AlarmProfile?
     @State private var futurePreviewSnapshot: FuturePreviewSnapshot?
     @State private var pendingFuturePreviewDate: Date?
-    private let futurePreviewDayCount = 92
 
     var body: some View {
         NavigationStack {
@@ -40,10 +39,12 @@ struct AlarmListView: View {
                         dates: calendarOverviewDates,
                         instances: calendarOverviewInstances,
                         exceptions: exceptions,
+                        holidayCalendar: holidayCalendar,
+                        companyRules: companyRules,
                         minimumHeight: 250,
                         onSelectDate: { selectedDate = $0 },
                         onFuturePreview: {
-                            futurePreviewSnapshot = FuturePreviewSnapshot(monthGroups: makeFuturePreviewGroups())
+                            futurePreviewSnapshot = makeFuturePreviewSnapshot()
                         }
                     )
                         .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
@@ -101,7 +102,9 @@ struct AlarmListView: View {
             .sheet(item: $futurePreviewSnapshot, onDismiss: presentPendingFuturePreviewDate) { snapshot in
                 FuturePreviewCalendarSheet(
                     monthGroups: snapshot.monthGroups,
-                    exceptions: exceptions
+                    exceptions: exceptions,
+                    holidayCalendar: holidayCalendar,
+                    companyRules: companyRules
                 ) { date in
                     pendingFuturePreviewDate = date
                     futurePreviewSnapshot = nil
@@ -212,7 +215,14 @@ struct AlarmListView: View {
     }
 
     private var futurePreviewStartDate: Date {
-        Calendar.chinaAlarm.date(byAdding: .day, value: 14, to: calendarOverviewStartDate) ?? calendarOverviewStartDate
+        calendarOverviewStartDate
+    }
+
+    private var futurePreviewDayCount: Int {
+        let calendar = Calendar.chinaAlarm
+        let currentYear = calendar.component(.year, from: Date())
+        let nextYearStart = calendar.date(from: DateComponents(year: currentYear + 1, month: 1, day: 1)) ?? futurePreviewStartDate
+        return max(0, calendar.dateComponents([.day], from: futurePreviewStartDate, to: nextYearStart).day ?? 0)
     }
 
     private var calendarOverviewStartDate: Date {
@@ -278,28 +288,85 @@ struct AlarmListView: View {
         selectedDate = date
     }
 
-    private func makeFuturePreviewGroups() -> [FuturePreviewMonthGroup] {
+    private func makeFuturePreviewSnapshot() -> FuturePreviewSnapshot {
         let calendar = Calendar.chinaAlarm
+        let holidayCalendar = self.holidayCalendar
+        let companyRules = self.companyRules
+        let exceptions = self.exceptions
         let dates = futurePreviewDates
-        let instances = futurePreviewInstances
-        let datesByMonth = Dictionary(grouping: dates) { date in
+        let instances = AlarmScheduleResolver().resolve(
+            profiles: profiles,
+            templates: templates,
+            holidayCalendar: holidayCalendar,
+            companyRules: companyRules,
+            exceptions: exceptions,
+            from: futurePreviewStartDate,
+            days: futurePreviewDayCount
+        )
+        let resolver = WorkdayResolver(calendar: calendar)
+        let previewKeys = Set(dates.map { calendar.startOfDayKey(for: $0) })
+        let instancesByDate = Dictionary(grouping: instances) { calendar.startOfDayKey(for: $0.fireDate) }
+        let restRanges = CalendarExceptionRangeGrouper(calendar: calendar)
+            .restRanges(holidayCalendar: holidayCalendar, exceptions: exceptions, within: previewKeys)
+        let restRangeGroups = restRanges.map { range in
+            let instances = range.dateKeys.flatMap { instancesByDate[$0] ?? [] }
+            return FuturePreviewRestRangeGroup(range: range, instances: instances)
+        }
+        let groupedRestRanges = Dictionary(grouping: restRangeGroups) { group in
+            let range = group.range
+            let components = calendar.dateComponents([.year, .month], from: range.restStart)
+            return calendar.date(from: components).map(calendar.startOfDay(for:)) ?? calendar.startOfDay(for: range.restStart)
+        }
+        let restKeys = Set(restRanges.flatMap(\.dateKeys))
+        let displayDates = dates.filter { !restKeys.contains(calendar.startOfDayKey(for: $0)) }
+
+        let groupedDates = Dictionary(grouping: displayDates) { date in
             let components = calendar.dateComponents([.year, .month], from: date)
             return calendar.date(from: components).map(calendar.startOfDay(for:)) ?? calendar.startOfDay(for: date)
         }
-        let instancesByDate = Dictionary(grouping: instances) { calendar.startOfDayKey(for: $0.fireDate) }
-
-        return datesByMonth.map { monthStart, monthDates in
-            let sortedDates = monthDates.sorted()
-            let monthInstances = sortedDates.flatMap { date in
-                instancesByDate[calendar.startOfDayKey(for: date)] ?? []
+        let monthStarts = Set(groupedDates.keys).union(groupedRestRanges.keys)
+        let monthGroups = monthStarts.map { monthStart in
+            let sortedDates = (groupedDates[monthStart] ?? []).sorted()
+            let datesByWeek = Dictionary(grouping: sortedDates) { date in
+                let components = calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: date)
+                return calendar.date(from: components).map(calendar.startOfDay(for:)) ?? calendar.startOfDay(for: date)
             }
+            let weekGroups = datesByWeek.map { weekStart, weekDates in
+                let sortedWeekDates = weekDates.sorted()
+                let weekInstances = sortedWeekDates.flatMap { date in
+                    instancesByDate[calendar.startOfDayKey(for: date)] ?? []
+                }
+                let markersByDate = Dictionary(uniqueKeysWithValues: sortedWeekDates.map { date in
+                    let key = calendar.startOfDayKey(for: date)
+                    return (
+                        key,
+                        resolver.dayMarkers(
+                            for: date,
+                            holidayCalendar: holidayCalendar,
+                            companyRules: companyRules,
+                            exceptions: exceptions
+                        )
+                    )
+                })
+                return FuturePreviewWeekGroup(
+                    monthStart: monthStart,
+                    weekStart: weekStart,
+                    dates: sortedWeekDates,
+                    instances: weekInstances,
+                    markersByDate: markersByDate
+                )
+            }
+            .sorted { $0.weekStart < $1.weekStart }
+
             return FuturePreviewMonthGroup(
                 monthStart: monthStart,
-                dates: sortedDates,
-                instances: monthInstances
+                weekGroups: weekGroups,
+                restRanges: groupedRestRanges[monthStart] ?? []
             )
         }
         .sorted { $0.monthStart < $1.monthStart }
+
+        return FuturePreviewSnapshot(monthGroups: monthGroups)
     }
 
     private func removeExceptions(on dateKey: String, kinds: [CalendarExceptionKind]) {
@@ -424,13 +491,33 @@ private struct FuturePreviewCalendarSheet: View {
     @Environment(\.dismiss) private var dismiss
     var monthGroups: [FuturePreviewMonthGroup]
     var exceptions: [CalendarException]
+    var holidayCalendar: HolidayCalendar
+    var companyRules: [CompanyCalendarRule]
     var onSelectDate: (Date) -> Void
+    @State private var expandedWeekIDs: Set<String>
+
+    init(
+        monthGroups: [FuturePreviewMonthGroup],
+        exceptions: [CalendarException],
+        holidayCalendar: HolidayCalendar,
+        companyRules: [CompanyCalendarRule],
+        onSelectDate: @escaping (Date) -> Void
+    ) {
+        self.monthGroups = monthGroups
+        self.exceptions = exceptions
+        self.holidayCalendar = holidayCalendar
+        self.companyRules = companyRules
+        self.onSelectDate = onSelectDate
+        _expandedWeekIDs = State(initialValue: Set(monthGroups.flatMap { month in
+            month.weekGroups.filter(\.isDefaultExpanded).map(\.id)
+        }))
+    }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 LazyVStack(spacing: 16) {
-                    Text("近 3 个月会按月份分开显示，点击任意日期可继续调整当天闹铃。")
+                    Text("预览会一直排到本年度结束；普通周默认收起，连续且跨周的休息日会合并成整块展示。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -439,21 +526,25 @@ private struct FuturePreviewCalendarSheet: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
                     ForEach(monthGroups) { group in
-                        AlarmCalendarOverviewCard(
-                            title: group.title,
-                            dates: group.dates,
-                            instances: group.instances,
+                        FuturePreviewMonthSection(
+                            group: group,
                             exceptions: exceptions,
-                            minimumHeight: group.preferredCardHeight,
-                            alignsToWeekday: true,
+                            holidayCalendar: holidayCalendar,
+                            companyRules: companyRules,
+                            expandedWeekIDs: $expandedWeekIDs,
                             onSelectDate: onSelectDate
                         )
+                    }
+
+                    if monthGroups.isEmpty {
+                        ContentUnavailableView("今年暂无更多预览", systemImage: "calendar", description: Text("本周与下周已经覆盖今年剩余日期。"))
                     }
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 16)
             }
             .background(Color(uiColor: .systemGroupedBackground))
+            .safeAreaPadding(.bottom, 28)
             .navigationTitle("未来预览")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -464,13 +555,14 @@ private struct FuturePreviewCalendarSheet: View {
                 }
             }
         }
+        .interactiveDismissDisabled()
     }
 }
 
 private struct FuturePreviewMonthGroup: Identifiable {
     var monthStart: Date
-    var dates: [Date]
-    var instances: [ScheduledAlarmInstance]
+    var weekGroups: [FuturePreviewWeekGroup]
+    var restRanges: [FuturePreviewRestRangeGroup]
 
     private var calendar: Calendar { .chinaAlarm }
 
@@ -480,12 +572,321 @@ private struct FuturePreviewMonthGroup: Identifiable {
         monthStart.formatted(.dateTime.year().month(.wide).locale(Locale(identifier: "zh_CN")))
     }
 
+    var rangeText: String {
+        let starts = weekGroups.compactMap(\.dates.first) + restRanges.map(\.range.start)
+        let ends = weekGroups.compactMap(\.dates.last) + restRanges.map(\.range.end)
+        guard let first = starts.min(), let last = ends.max() else { return "" }
+        return "\(monthDayText(first))-\(monthDayText(last))"
+    }
+
+    private func monthDayText(_ date: Date) -> String {
+        let components = calendar.dateComponents([.month, .day], from: date)
+        return "\(components.month ?? 0)/\(components.day ?? 0)"
+    }
+}
+
+private struct FuturePreviewWeekGroup: Identifiable {
+    var monthStart: Date
+    var weekStart: Date
+    var dates: [Date]
+    var instances: [ScheduledAlarmInstance]
+    var markersByDate: [String: [CalendarDayMarker]]
+
+    private var calendar: Calendar { .chinaAlarm }
+
+    var id: String { "\(DateKey(date: monthStart).rawValue)-\(DateKey(date: weekStart).rawValue)" }
+
+    var title: String {
+        guard let first = dates.first, let last = dates.last else { return "" }
+        return "\(monthDayText(first))-\(monthDayText(last))"
+    }
+
+    var markerKinds: [CalendarDayMarkerKind] {
+        let presentKinds = Set(markersByDate.values.flatMap { $0.map(\.kind) })
+        return CalendarDayMarkerKind.allCases.filter { presentKinds.contains($0) }
+    }
+
+    var markerSummaries: [FuturePreviewMarkerSummary] {
+        let allMarkers = markersByDate.values.flatMap { $0 }
+        return CalendarDayMarkerKind.allCases.compactMap { kind in
+            let markers = allMarkers.filter { $0.kind == kind }
+            guard !markers.isEmpty else { return nil }
+
+            let titles = Array(Set(markers.map(\.title))).sorted()
+            let title: String
+            if (kind == .holidayRest || kind == .extraRest), titles.count == 1, let onlyTitle = titles.first {
+                title = onlyTitle
+            } else {
+                title = kind.legendTitle
+            }
+            return FuturePreviewMarkerSummary(kind: kind, title: title)
+        }
+    }
+
+    var isDefaultExpanded: Bool {
+        isCurrentWeek || !markerKinds.isEmpty
+    }
+
     var preferredCardHeight: CGFloat {
         let leadingBlanks = dates.first.map { (calendar.weekdayNumber(for: $0) + 5) % 7 } ?? 0
         let rowCount = Int(ceil(Double(leadingBlanks + dates.count) / 7.0))
-        let gridHeight = 20 + CGFloat(rowCount) * 52 + CGFloat(max(rowCount - 1, 0)) * 8
-        return 18 + 22 + 14 + gridHeight + 12 + 24 + 18
+        let gridHeight = 20 + CGFloat(rowCount) * AlarmCalendarMetrics.dayCellHeight + CGFloat(max(rowCount - 1, 0)) * 8
+        return 18 + 22 + 14 + gridHeight + 12 + 42 + 18
     }
+
+    private func monthDayText(_ date: Date) -> String {
+        let components = calendar.dateComponents([.month, .day], from: date)
+        return "\(components.month ?? 0)/\(components.day ?? 0)"
+    }
+
+    private var isCurrentWeek: Bool {
+        let currentWeekStart = calendar
+            .date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: Date()))
+            .map(calendar.startOfDay(for:))
+        return currentWeekStart.map { calendar.isDate($0, inSameDayAs: weekStart) } ?? false
+    }
+}
+
+private struct FuturePreviewMarkerSummary: Identifiable, Hashable {
+    var kind: CalendarDayMarkerKind
+    var title: String
+
+    var id: String { "\(kind.rawValue)-\(title)" }
+}
+
+private struct FuturePreviewRestRangeGroup: Identifiable {
+    var range: CalendarExceptionRange
+    var instances: [ScheduledAlarmInstance]
+
+    var id: String { range.id }
+}
+
+private enum FuturePreviewMonthItem: Identifiable {
+    case restRange(FuturePreviewRestRangeGroup)
+    case week(FuturePreviewWeekGroup)
+
+    var id: String {
+        switch self {
+        case .restRange(let range): "rest-\(range.id)"
+        case .week(let week): "week-\(week.id)"
+        }
+    }
+
+    var sortDate: Date {
+        switch self {
+        case .restRange(let group): group.range.restStart
+        case .week(let week): week.dates.first ?? week.weekStart
+        }
+    }
+}
+
+private struct FuturePreviewMonthSection: View {
+    var group: FuturePreviewMonthGroup
+    var exceptions: [CalendarException]
+    var holidayCalendar: HolidayCalendar
+    var companyRules: [CompanyCalendarRule]
+    @Binding var expandedWeekIDs: Set<String>
+    var onSelectDate: (Date) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(group.title)
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Text(group.rangeText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 4)
+
+            VStack(spacing: 10) {
+                ForEach(items) { item in
+                    switch item {
+                    case .restRange(let group):
+                        FuturePreviewRestRangeSection(
+                            group: group,
+                            exceptions: exceptions,
+                            holidayCalendar: holidayCalendar,
+                            companyRules: companyRules,
+                            onSelectDate: onSelectDate
+                        )
+                    case .week(let week):
+                        FuturePreviewWeekSection(
+                            week: week,
+                            exceptions: exceptions,
+                            holidayCalendar: holidayCalendar,
+                            companyRules: companyRules,
+                            isExpanded: expandedBinding(for: week),
+                            onSelectDate: onSelectDate
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private var items: [FuturePreviewMonthItem] {
+        (group.restRanges.map(FuturePreviewMonthItem.restRange) + group.weekGroups.map(FuturePreviewMonthItem.week))
+            .sorted { $0.sortDate < $1.sortDate }
+    }
+
+    private func expandedBinding(for week: FuturePreviewWeekGroup) -> Binding<Bool> {
+        Binding(
+            get: { expandedWeekIDs.contains(week.id) },
+            set: { isExpanded in
+                if isExpanded {
+                    expandedWeekIDs.insert(week.id)
+                } else {
+                    expandedWeekIDs.remove(week.id)
+                }
+            }
+        )
+    }
+}
+
+private struct FuturePreviewRestRangeSection: View {
+    var group: FuturePreviewRestRangeGroup
+    var exceptions: [CalendarException]
+    var holidayCalendar: HolidayCalendar
+    var companyRules: [CompanyCalendarRule]
+    var onSelectDate: (Date) -> Void
+
+    private var calendar: Calendar { .chinaAlarm }
+    private var range: CalendarExceptionRange { group.range }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        CalendarMarkerBadge(kind: range.kind)
+                        Text(range.title)
+                            .font(.headline)
+                    }
+                    Text(restRangeSubtitle)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("\(range.restDateKeys.count) 天休息")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 12)
+            .padding(.horizontal, 12)
+            .background(Color(uiColor: .secondarySystemGroupedBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            AlarmCalendarOverviewCard(
+                title: "闹铃概览",
+                dates: rangeDates,
+                instances: group.instances,
+                exceptions: exceptions,
+                holidayCalendar: holidayCalendar,
+                companyRules: companyRules,
+                minimumHeight: preferredCardHeight,
+                alignsToWeekday: true,
+                onSelectDate: onSelectDate
+            )
+        }
+    }
+
+    private var rangeDates: [Date] {
+        range.dateKeys.compactMap { DateKey($0).date(calendar: calendar) }
+    }
+
+    private var restRangeSubtitle: String {
+        let restText = "\(monthDayText(range.restStart))-\(monthDayText(range.restEnd))"
+        let displayText = "\(monthDayText(range.start))-\(monthDayText(range.end))"
+        return restText == displayText ? restText : "\(restText) · 展示 \(displayText)"
+    }
+
+    private var preferredCardHeight: CGFloat {
+        let rowCount = max(1, Int(ceil(Double(rangeDates.count) / 7.0)))
+        let gridHeight = 20 + CGFloat(rowCount) * AlarmCalendarMetrics.dayCellHeight + CGFloat(max(rowCount - 1, 0)) * 6
+        return 18 + 22 + 12 + gridHeight + 18
+    }
+
+    private func monthDayText(_ date: Date) -> String {
+        let components = calendar.dateComponents([.month, .day], from: date)
+        return "\(components.month ?? 0)/\(components.day ?? 0)"
+    }
+}
+
+private struct FuturePreviewWeekSection: View {
+    var week: FuturePreviewWeekGroup
+    var exceptions: [CalendarException]
+    var holidayCalendar: HolidayCalendar
+    var companyRules: [CompanyCalendarRule]
+    @Binding var isExpanded: Bool
+    var onSelectDate: (Date) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: isCollapsedRegularWeek ? 4 : 8) {
+            Button {
+                isExpanded.toggle()
+            } label: {
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: isCollapsedRegularWeek ? 2 : 4) {
+                        Text(week.title)
+                            .font(isCollapsedRegularWeek ? .subheadline.weight(.semibold) : .headline)
+                        HStack(spacing: 6) {
+                            if week.markerSummaries.isEmpty {
+                                Text("常规周")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                ForEach(week.markerSummaries) { summary in
+                                    HStack(spacing: 3) {
+                                        CalendarMarkerBadge(kind: summary.kind)
+                                        Text(summary.title)
+                                            .font(.caption2.weight(.medium))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Spacer()
+                    Text(isExpanded ? "收起" : "展开")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Image(systemName: "chevron.down")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isExpanded ? 180 : 0))
+                }
+                .padding(.vertical, isCollapsedRegularWeek ? 7 : 12)
+                .padding(.horizontal, 12)
+                .background(Color(uiColor: .secondarySystemGroupedBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                AlarmCalendarOverviewCard(
+                    title: "闹铃概览",
+                    dates: week.dates,
+                    instances: week.instances,
+                    exceptions: exceptions,
+                    holidayCalendar: holidayCalendar,
+                    companyRules: companyRules,
+                    minimumHeight: week.preferredCardHeight,
+                    alignsToWeekday: true,
+                    onSelectDate: onSelectDate
+                )
+            }
+        }
+    }
+
+    private var isCollapsedRegularWeek: Bool {
+        !isExpanded && week.markerKinds.isEmpty
+    }
+}
+
+private enum AlarmCalendarMetrics {
+    static let dayCellHeight: CGFloat = 66
 }
 
 private struct AlarmCalendarOverviewCard: View {
@@ -493,21 +894,24 @@ private struct AlarmCalendarOverviewCard: View {
     var dates: [Date]
     var instances: [ScheduledAlarmInstance]
     var exceptions: [CalendarException]
+    var holidayCalendar: HolidayCalendar
+    var companyRules: [CompanyCalendarRule]
     var minimumHeight: CGFloat
     var alignsToWeekday = false
     var onSelectDate: (Date) -> Void
     var onFuturePreview: (() -> Void)? = nil
 
     private let calendar = Calendar.chinaAlarm
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 6), count: 7)
     private let weekdays = ["一", "二", "三", "四", "五", "六", "日"]
     private let palette: [Color] = [.orange, .indigo, .teal, .pink, .blue, .green, .purple, .mint]
 
     var body: some View {
         let instancesByDate = self.instancesByDate
         let exceptionKindsByDate = self.exceptionKindsByDate
+        let dayMarkersByDate = self.dayMarkersByDate
         let colorMap = self.colorMap
         let legendItems = self.legendItems
+        let markerLegendItems = self.markerLegendItems
 
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .firstTextBaseline) {
@@ -519,34 +923,46 @@ private struct AlarmCalendarOverviewCard: View {
                     .foregroundStyle(.secondary)
             }
 
-            LazyVGrid(columns: columns, spacing: 8) {
-                ForEach(weekdays, id: \.self) { weekday in
-                    Text(weekday)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity)
+            VStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    ForEach(weekdays, id: \.self) { weekday in
+                        Text(weekday)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                    }
                 }
 
-                ForEach(0..<leadingBlankCount, id: \.self) { _ in
-                    Color.clear
-                        .frame(maxWidth: .infinity, minHeight: 52)
+                ForEach(Array(calendarRows.enumerated()), id: \.offset) { _, row in
+                    HStack(spacing: 6) {
+                        ForEach(row.indices, id: \.self) { index in
+                            if let date = row[index] {
+                                let dateKey = calendar.startOfDayKey(for: date)
+                                AlarmDayCell(
+                                    date: date,
+                                    instances: instancesByDate[dateKey] ?? [],
+                                    exceptionKinds: exceptionKindsByDate[dateKey] ?? [],
+                                    markers: dayMarkersByDate[dateKey] ?? [],
+                                    colors: colorMap,
+                                    isToday: calendar.isDateInToday(date),
+                                    onTap: { onSelectDate(date) }
+                                )
+                            } else {
+                                Color.clear
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: AlarmCalendarMetrics.dayCellHeight)
+                            }
+                        }
+                    }
                 }
+            }
 
-                ForEach(dates, id: \.self) { date in
-                    AlarmDayCell(
-                        date: date,
-                        instances: instancesByDate[calendar.startOfDayKey(for: date)] ?? [],
-                        exceptionKinds: exceptionKindsByDate[calendar.startOfDayKey(for: date)] ?? [],
-                        colors: colorMap,
-                        isToday: calendar.isDateInToday(date),
-                        onTap: { onSelectDate(date) }
-                    )
-                }
+            if !markerLegendItems.isEmpty {
+                MarkerLegend(items: markerLegendItems)
             }
 
             if !legendItems.isEmpty {
                 FlowLegend(items: legendItems)
-                    .frame(height: 22)
             }
 
             if let onFuturePreview {
@@ -560,7 +976,7 @@ private struct AlarmCalendarOverviewCard: View {
             }
         }
         .padding(18)
-        .frame(minHeight: minimumHeight, alignment: .top)
+        .frame(minHeight: onFuturePreview == nil ? 0 : minimumHeight, alignment: .top)
         .background(Color(uiColor: .secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
@@ -573,11 +989,30 @@ private struct AlarmCalendarOverviewCard: View {
         Dictionary(grouping: exceptions, by: \.dateKey).mapValues { Set($0.map(\.kind)) }
     }
 
+    private var dayMarkersByDate: [String: [CalendarDayMarker]] {
+        let resolver = WorkdayResolver(calendar: calendar)
+        return Dictionary(uniqueKeysWithValues: dates.map { date in
+            let key = calendar.startOfDayKey(for: date)
+            let markers = resolver.dayMarkers(
+                for: date,
+                holidayCalendar: holidayCalendar,
+                companyRules: companyRules,
+                exceptions: exceptions
+            )
+            return (key, markers)
+        })
+    }
+
     private var colorMap: [ClockTime: Color] {
         let times = Array(Set(instances.map(\.time))).sorted()
         return Dictionary(uniqueKeysWithValues: times.enumerated().map { index, time in
             (time, palette[index % palette.count])
         })
+    }
+
+    private var markerLegendItems: [CalendarDayMarkerKind] {
+        let presentKinds = Set(dayMarkersByDate.values.flatMap { $0.map(\.kind) })
+        return CalendarDayMarkerKind.allCases.filter { presentKinds.contains($0) }
     }
 
     private var legendItems: [AlarmLegendItem] {
@@ -591,6 +1026,17 @@ private struct AlarmCalendarOverviewCard: View {
         return (calendar.weekdayNumber(for: firstDate) + 5) % 7
     }
 
+    private var calendarRows: [[Date?]] {
+        var cells = Array<Date?>(repeating: nil, count: leadingBlankCount) + dates.map { Optional($0) }
+        while cells.count % 7 != 0 {
+            cells.append(nil)
+        }
+
+        return stride(from: 0, to: cells.count, by: 7).map { start in
+            Array(cells[start..<min(start + 7, cells.count)])
+        }
+    }
+
     private func monthDayText(_ date: Date) -> String {
         let components = calendar.dateComponents([.month, .day], from: date)
         return "\(components.month ?? 0)/\(components.day ?? 0)"
@@ -601,6 +1047,7 @@ private struct AlarmDayCell: View {
     var date: Date
     var instances: [ScheduledAlarmInstance]
     var exceptionKinds: Set<CalendarExceptionKind>
+    var markers: [CalendarDayMarker]
     var colors: [ClockTime: Color]
     var isToday: Bool
     var onTap: () -> Void
@@ -609,8 +1056,8 @@ private struct AlarmDayCell: View {
 
     var body: some View {
         Button(action: onTap) {
-            VStack(spacing: 5) {
-                ZStack(alignment: .topTrailing) {
+            VStack(spacing: 4) {
+                ZStack(alignment: .bottom) {
                     Text("\(calendar.component(.day, from: date))")
                         .font(.caption.weight(isToday ? .bold : .semibold))
                         .monospacedDigit()
@@ -623,24 +1070,41 @@ private struct AlarmDayCell: View {
                         }
                         .clipShape(Circle())
 
+                    HStack(spacing: 2) {
+                        ForEach(markers.prefix(2)) { marker in
+                            CalendarMarkerBadge(kind: marker.kind)
+                        }
+                    }
+                    .offset(y: 7)
+
                     if isToday {
-                        Text("今")
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 14, height: 14)
-                            .background(Color.orange)
-                            .clipShape(Circle())
-                            .offset(x: 4, y: -4)
+                        VStack {
+                            HStack {
+                                Spacer()
+                                Text("今")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 14, height: 14)
+                                    .background(Color.orange)
+                                    .clipShape(Circle())
+                                    .offset(x: 4, y: -4)
+                            }
+                            Spacer()
+                        }
                     }
                 }
                 .frame(width: 40, height: 38)
 
+                Text(markerSubtitle)
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(markerColor ?? .secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 10)
+
                 HStack(spacing: 2) {
-                    if uniqueTimes.isEmpty {
-                        Circle()
-                            .fill(Color.gray.opacity(0.45))
-                            .frame(width: 5, height: 5)
-                    } else {
+                    if !uniqueTimes.isEmpty {
                         ForEach(uniqueTimes.prefix(4), id: \.self) { time in
                             Circle()
                                 .fill(colors[time] ?? .orange)
@@ -650,7 +1114,7 @@ private struct AlarmDayCell: View {
                 }
                 .frame(height: 6)
             }
-            .frame(maxWidth: .infinity, minHeight: 52)
+            .frame(maxWidth: .infinity, minHeight: AlarmCalendarMetrics.dayCellHeight)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(accessibilityText)
@@ -669,6 +1133,9 @@ private struct AlarmDayCell: View {
     }
 
     private var backgroundColor: Color {
+        if let markerColor {
+            return markerColor.opacity(0.22)
+        }
         if isModified {
             return modifiedColor.opacity(0.22)
         }
@@ -682,6 +1149,9 @@ private struct AlarmDayCell: View {
     }
 
     private var strokeColor: Color {
+        if let markerColor {
+            return markerColor
+        }
         if isModified {
             return modifiedColor
         }
@@ -689,6 +1159,17 @@ private struct AlarmDayCell: View {
             return .orange
         }
         return primaryColor ?? Color.clear
+    }
+
+    private var markerColor: Color? {
+        markers.first.map { Color.calendarMarker($0.kind) }
+    }
+
+    private var markerSubtitle: String {
+        guard let marker = markers.first(where: { $0.kind == .holidayRest || $0.kind == .extraRest }) else {
+            return ""
+        }
+        return marker.title
     }
 
     private var modifiedColor: Color {
@@ -705,8 +1186,22 @@ private struct AlarmDayCell: View {
     private var accessibilityText: String {
         let key = DateKey(date: date).rawValue
         let modified = isModified ? "，已手动修改" : ""
-        guard !uniqueTimes.isEmpty else { return "\(key)，无闹铃\(modified)" }
-        return "\(key)，闹铃 \(uniqueTimes.map(\.displayText).joined(separator: "、"))\(modified)"
+        let markerText = markers.isEmpty ? "" : "，\(markers.map(\.title).joined(separator: "、"))"
+        guard !uniqueTimes.isEmpty else { return "\(key)\(markerText)，无闹铃\(modified)" }
+        return "\(key)\(markerText)，闹铃 \(uniqueTimes.map(\.displayText).joined(separator: "、"))\(modified)"
+    }
+}
+
+private struct CalendarMarkerBadge: View {
+    var kind: CalendarDayMarkerKind
+
+    var body: some View {
+        Text(kind.shortTitle)
+            .font(.system(size: 8, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(width: 13, height: 12)
+            .background(Color.calendarMarker(kind))
+            .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
     }
 }
 
@@ -1051,6 +1546,38 @@ private struct FlowLegend: View {
                     }
                 }
             }
+            .padding(.vertical, 2)
+        }
+    }
+}
+
+private struct MarkerLegend: View {
+    var items: [CalendarDayMarkerKind]
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(items, id: \.rawValue) { item in
+                    HStack(spacing: 4) {
+                        CalendarMarkerBadge(kind: item)
+                        Text(item.legendTitle)
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(.vertical, 2)
+        }
+    }
+}
+
+private extension Color {
+    static func calendarMarker(_ kind: CalendarDayMarkerKind) -> Color {
+        switch kind {
+        case .holidayRest: .pink
+        case .makeupWorkday: .blue
+        case .companyWorkday: .orange
+        case .extraRest: .green
         }
     }
 }

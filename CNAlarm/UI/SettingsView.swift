@@ -11,24 +11,14 @@ struct SettingsView: View {
     @Query private var exceptions: [CalendarException]
     @Query private var companyRules: [CompanyCalendarRule]
     @AppStorage("holidaySourceURL") private var sourceURL = HolidayCalendarSource.defaultURL.absoluteString
-    @AppStorage("winterVacationModeEnabled") private var winterVacationModeEnabled = false
-    @AppStorage("summerVacationModeEnabled") private var summerVacationModeEnabled = false
-    @AppStorage("vacationStartTimestamp") private var vacationStartTimestamp = Date().timeIntervalSince1970
-    @AppStorage("vacationEndTimestamp") private var vacationEndTimestamp = Calendar.chinaAlarm.date(byAdding: .day, value: 30, to: Date())?.timeIntervalSince1970 ?? Date().timeIntervalSince1970
-    @AppStorage("summerVacationStartTimestamp") private var summerVacationStartTimestamp = Calendar.chinaAlarm.date(byAdding: .month, value: 2, to: Date())?.timeIntervalSince1970 ?? Date().timeIntervalSince1970
-    @AppStorage("summerVacationEndTimestamp") private var summerVacationEndTimestamp = Calendar.chinaAlarm.date(byAdding: .month, value: 3, to: Date())?.timeIntervalSince1970 ?? Date().timeIntervalSince1970
-
     @State private var refreshStatus = "未刷新"
     @State private var importingSound = false
     @State private var soundImportStatus: String?
     @State private var alarmDiagnosticStatus = "未检查"
+    @State private var editingLeaveType: LeaveType?
     @StateObject private var previewPlayer = SoundPreviewPlayer()
 
     private let soundManager = SoundAssetManager()
-    private let winterVacationExceptionNote = "设置生成：寒假休息"
-    private let summerVacationExceptionNote = "设置生成：暑假休息"
-    private let legacyVacationExceptionNote = "设置生成：寒暑假休息"
-
     var body: some View {
         NavigationStack {
             Form {
@@ -57,17 +47,31 @@ struct SettingsView: View {
                         DatePicker("大小周起始周六", selection: alternateSaturdayAnchorBinding, displayedComponents: .date)
                     }
                     Toggle("单休（周六上班）", isOn: companyRuleEnabledBinding(kind: .singleDayOff, name: "单休"))
-                    Toggle("寒假休息", isOn: winterVacationModeBinding)
-                    if winterVacationModeEnabled {
-                        DatePicker("寒假开始", selection: vacationStartBinding, displayedComponents: .date)
-                        DatePicker("寒假结束", selection: vacationEndBinding, displayedComponents: .date)
-                    }
-                    Toggle("暑假休息", isOn: summerVacationModeBinding)
-                    if summerVacationModeEnabled {
-                        DatePicker("暑假开始", selection: summerVacationStartBinding, displayedComponents: .date)
-                        DatePicker("暑假结束", selection: summerVacationEndBinding, displayedComponents: .date)
-                    }
                     Text("开启后会参与智能工作日识别；手动日期例外和国家调休仍保持更高优先级。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("休假") {
+                    ForEach(LeaveType.defaults) { leaveType in
+                        Button {
+                            editingLeaveType = leaveType
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(leaveType.title)
+                                        .foregroundStyle(.primary)
+                                    Text(leaveSubtitle(for: leaveType))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Image(systemName: "calendar.badge.plus")
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+                    }
+                    Text("适合寒假、暑假、年假、婚假、产假/陪产假、病假、事假、调休假等连续多日休息。进入后在日历上点选，或按住日期滑动经过来多选。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -175,6 +179,17 @@ struct SettingsView: View {
                     soundImportStatus = "导入失败：\(error.localizedDescription)"
                 }
             }
+            .sheet(item: $editingLeaveType) { leaveType in
+                LeaveCalendarSelectionSheet(
+                    leaveType: leaveType,
+                    initialSelectedKeys: leaveDateKeys(for: leaveType)
+                ) { selectedKeys in
+                    applyLeaveSelection(leaveType, selectedDateKeys: selectedKeys)
+                    editingLeaveType = nil
+                } onCancel: {
+                    editingLeaveType = nil
+                }
+            }
         }
     }
 
@@ -225,66 +240,6 @@ struct SettingsView: View {
         )
     }
 
-    private var winterVacationModeBinding: Binding<Bool> {
-        Binding(
-            get: { winterVacationModeEnabled },
-            set: { enabled in
-                winterVacationModeEnabled = enabled
-                applyVacationExceptions()
-            }
-        )
-    }
-
-    private var summerVacationModeBinding: Binding<Bool> {
-        Binding(
-            get: { summerVacationModeEnabled },
-            set: { enabled in
-                summerVacationModeEnabled = enabled
-                applyVacationExceptions()
-            }
-        )
-    }
-
-    private var vacationStartBinding: Binding<Date> {
-        Binding(
-            get: { Date(timeIntervalSince1970: vacationStartTimestamp) },
-            set: { date in
-                vacationStartTimestamp = Calendar.chinaAlarm.startOfDay(for: date).timeIntervalSince1970
-                applyVacationExceptions()
-            }
-        )
-    }
-
-    private var vacationEndBinding: Binding<Date> {
-        Binding(
-            get: { Date(timeIntervalSince1970: vacationEndTimestamp) },
-            set: { date in
-                vacationEndTimestamp = Calendar.chinaAlarm.startOfDay(for: date).timeIntervalSince1970
-                applyVacationExceptions()
-            }
-        )
-    }
-
-    private var summerVacationStartBinding: Binding<Date> {
-        Binding(
-            get: { Date(timeIntervalSince1970: summerVacationStartTimestamp) },
-            set: { date in
-                summerVacationStartTimestamp = Calendar.chinaAlarm.startOfDay(for: date).timeIntervalSince1970
-                applyVacationExceptions()
-            }
-        )
-    }
-
-    private var summerVacationEndBinding: Binding<Date> {
-        Binding(
-            get: { Date(timeIntervalSince1970: summerVacationEndTimestamp) },
-            set: { date in
-                summerVacationEndTimestamp = Calendar.chinaAlarm.startOfDay(for: date).timeIntervalSince1970
-                applyVacationExceptions()
-            }
-        )
-    }
-
     private func ensureCompanyRule(kind: CompanyRuleKind, name: String) -> CompanyCalendarRule {
         if let existing = companyRules.first(where: { $0.kind == kind }) {
             return existing
@@ -308,49 +263,33 @@ struct SettingsView: View {
         return candidate
     }
 
-    private func applyVacationExceptions() {
-        let generatedNotes = [winterVacationExceptionNote, summerVacationExceptionNote, legacyVacationExceptionNote]
-        for exception in exceptions where generatedNotes.contains(exception.note) {
+    private func leaveSubtitle(for leaveType: LeaveType) -> String {
+        let ranges = CalendarExceptionRangeGrouper(calendar: .chinaAlarm)
+            .leaveRanges(from: exceptions.filter { leaveType.matches(note: $0.note) })
+        guard !ranges.isEmpty else { return "未设置" }
+        if ranges.count == 1, let range = ranges.first {
+            return "\(compactDate(range.start)) - \(compactDate(range.end))，\(range.dateKeys.count) 天"
+        }
+        let totalDays = ranges.reduce(0) { $0 + $1.dateKeys.count }
+        return "\(ranges.count) 段，共 \(totalDays) 天"
+    }
+
+    private func leaveDateKeys(for leaveType: LeaveType) -> Set<String> {
+        Set(exceptions.filter { $0.kind == .restDayOverride && leaveType.matches(note: $0.note) }.map(\.dateKey))
+    }
+
+    private func applyLeaveSelection(_ leaveType: LeaveType, selectedDateKeys: Set<String>) {
+        for exception in exceptions where exception.kind == .restDayOverride && leaveType.matches(note: exception.note) {
             modelContext.delete(exception)
         }
-
-        var insertedDateKeys = Set<String>()
-        if winterVacationModeEnabled {
-            insertVacationExceptions(
-                startTimestamp: vacationStartTimestamp,
-                endTimestamp: vacationEndTimestamp,
-                note: winterVacationExceptionNote,
-                insertedDateKeys: &insertedDateKeys
-            )
+        for key in selectedDateKeys.sorted() {
+            modelContext.insert(CalendarException(dateKey: key, kind: .restDayOverride, note: leaveType.note))
         }
-        if summerVacationModeEnabled {
-            insertVacationExceptions(
-                startTimestamp: summerVacationStartTimestamp,
-                endTimestamp: summerVacationEndTimestamp,
-                note: summerVacationExceptionNote,
-                insertedDateKeys: &insertedDateKeys
-            )
-        }
-
         saveSettingsAndResync()
     }
 
-    private func insertVacationExceptions(startTimestamp: Double, endTimestamp: Double, note: String, insertedDateKeys: inout Set<String>) {
-        let calendar = Calendar.chinaAlarm
-        let start = calendar.startOfDay(for: Date(timeIntervalSince1970: min(startTimestamp, endTimestamp)))
-        let end = calendar.startOfDay(for: Date(timeIntervalSince1970: max(startTimestamp, endTimestamp)))
-        let days = min((calendar.dateComponents([.day], from: start, to: end).day ?? 0) + 1, 180)
-        for date in calendar.dateRange(from: start, days: max(days, 0)) {
-            let dateKey = calendar.startOfDayKey(for: date)
-            guard insertedDateKeys.insert(dateKey).inserted else { continue }
-            modelContext.insert(
-                CalendarException(
-                    dateKey: dateKey,
-                    kind: .restDayOverride,
-                    note: note
-                )
-            )
-        }
+    private func compactDate(_ date: Date) -> String {
+        date.formatted(.dateTime.month(.twoDigits).day(.twoDigits).locale(Locale(identifier: "zh_CN")))
     }
 
     private func saveSettingsAndResync() {
@@ -446,5 +385,263 @@ struct SettingsView: View {
         } catch {
             soundImportStatus = "已删除铃声，但系统闹铃同步失败：\(error.localizedDescription)"
         }
+    }
+}
+
+private struct LeaveType: Identifiable, Hashable {
+    var id: String { note }
+    var title: String
+    var note: String
+    var legacyNotes: [String] = []
+
+    static let defaults: [LeaveType] = [
+        LeaveType(title: "寒假", note: "休假：寒假", legacyNotes: ["设置生成：寒假休息", "设置生成：寒暑假休息"]),
+        LeaveType(title: "暑假", note: "休假：暑假", legacyNotes: ["设置生成：暑假休息", "设置生成：寒暑假休息"]),
+        LeaveType(title: "年假", note: "休假：年假"),
+        LeaveType(title: "婚假", note: "休假：婚假"),
+        LeaveType(title: "产假/陪产假", note: "休假：产假/陪产假"),
+        LeaveType(title: "病假", note: "休假：病假"),
+        LeaveType(title: "事假", note: "休假：事假"),
+        LeaveType(title: "调休假", note: "休假：调休假")
+    ]
+
+    func matches(note otherNote: String) -> Bool {
+        otherNote == note || legacyNotes.contains(otherNote)
+    }
+}
+
+private struct LeaveCalendarSelectionSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    var leaveType: LeaveType
+    var initialSelectedKeys: Set<String>
+    var onSave: (Set<String>) -> Void
+    var onCancel: () -> Void
+
+    @State private var visibleMonth: Date
+    @State private var selectedKeys: Set<String>
+    @State private var dragTouchedKeys: Set<String> = []
+    @State private var isDraggingSelection = false
+
+    private let calendar = Calendar.chinaAlarm
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 7)
+    private let weekdays = ["一", "二", "三", "四", "五", "六", "日"]
+    private let gridSpacing: CGFloat = 8
+    private let rowSpacing: CGFloat = 10
+    private let dateCellHeight: CGFloat = 44
+
+    init(
+        leaveType: LeaveType,
+        initialSelectedKeys: Set<String>,
+        onSave: @escaping (Set<String>) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        self.leaveType = leaveType
+        self.initialSelectedKeys = initialSelectedKeys
+        self.onSave = onSave
+        self.onCancel = onCancel
+        if let firstKey = initialSelectedKeys.sorted().first, let firstDate = DateKey(firstKey).date() {
+            _visibleMonth = State(initialValue: Calendar.chinaAlarm.date(from: Calendar.chinaAlarm.dateComponents([.year, .month], from: firstDate)) ?? firstDate)
+        } else {
+            let now = Date()
+            _visibleMonth = State(initialValue: Calendar.chinaAlarm.date(from: Calendar.chinaAlarm.dateComponents([.year, .month], from: now)) ?? now)
+        }
+        _selectedKeys = State(initialValue: initialSelectedKeys)
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 16) {
+                HStack {
+                    Button {
+                        shiftMonth(-1)
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .frame(width: 42, height: 42)
+                    }
+
+                    Spacer()
+
+                    Text(visibleMonth.formatted(.dateTime.year().month(.wide).locale(Locale(identifier: "zh_CN"))))
+                        .font(.title3.weight(.semibold))
+
+                    Spacer()
+
+                    Button {
+                        shiftMonth(1)
+                    } label: {
+                        Image(systemName: "chevron.right")
+                            .frame(width: 42, height: 42)
+                    }
+                }
+                .buttonStyle(.bordered)
+
+                HStack(spacing: gridSpacing) {
+                    ForEach(weekdays, id: \.self) { weekday in
+                        Text(weekday)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+
+                GeometryReader { proxy in
+                    LazyVGrid(columns: columns, spacing: rowSpacing) {
+                        ForEach(0..<leadingBlankCount, id: \.self) { _ in
+                            Color.clear.frame(height: dateCellHeight)
+                        }
+
+                        ForEach(monthDates, id: \.self) { date in
+                            LeaveDateCell(
+                                date: date,
+                                isSelected: selectedKeys.contains(calendar.startOfDayKey(for: date)),
+                                isToday: calendar.isDateInToday(date)
+                            )
+                            .onTapGesture {
+                                guard !isDraggingSelection else { return }
+                                toggle(date)
+                            }
+                        }
+                    }
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 8, coordinateSpace: .local)
+                            .onChanged { value in
+                                isDraggingSelection = true
+                                selectDate(at: value.location, gridWidth: proxy.size.width)
+                            }
+                            .onEnded { _ in
+                                dragTouchedKeys.removeAll()
+                                DispatchQueue.main.async {
+                                    isDraggingSelection = false
+                                }
+                            }
+                    )
+                }
+                .frame(height: dateGridHeight)
+
+                HStack {
+                    Text("\(selectedKeys.count) 天已选")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("清空") {
+                        selectedKeys.removeAll()
+                    }
+                    .disabled(selectedKeys.isEmpty)
+                }
+
+                Text("点选日期可切换；按住日期滑动经过会连续加入多天。保存后这些日期会作为额外休息日参与工作日识别，并在首页与未来预览中显示“休”。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Spacer(minLength: 0)
+            }
+            .padding(20)
+            .background(Color(uiColor: .systemGroupedBackground))
+            .navigationTitle(leaveType.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("取消") {
+                        onCancel()
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("保存") {
+                        onSave(selectedKeys)
+                        dismiss()
+                    }
+                    .fontWeight(.semibold)
+                }
+            }
+        }
+    }
+
+    private var monthDates: [Date] {
+        guard let range = calendar.range(of: .day, in: .month, for: visibleMonth) else { return [] }
+        return range.compactMap { day in
+            calendar.date(bySetting: .day, value: day, of: visibleMonth)
+        }
+    }
+
+    private var leadingBlankCount: Int {
+        guard let first = monthDates.first else { return 0 }
+        return (calendar.weekdayNumber(for: first) + 5) % 7
+    }
+
+    private var dateGridHeight: CGFloat {
+        CGFloat(max(rowCount, 1)) * dateCellHeight + CGFloat(max(rowCount - 1, 0)) * rowSpacing
+    }
+
+    private var rowCount: Int {
+        Int(ceil(Double(leadingBlankCount + monthDates.count) / 7.0))
+    }
+
+    private func shiftMonth(_ delta: Int) {
+        visibleMonth = calendar.date(byAdding: .month, value: delta, to: visibleMonth) ?? visibleMonth
+    }
+
+    private func toggle(_ date: Date) {
+        let key = calendar.startOfDayKey(for: date)
+        if selectedKeys.contains(key) {
+            selectedKeys.remove(key)
+        } else {
+            selectedKeys.insert(key)
+        }
+    }
+
+    private func selectDuringDrag(_ date: Date) {
+        let key = calendar.startOfDayKey(for: date)
+        guard dragTouchedKeys.insert(key).inserted else { return }
+        selectedKeys.insert(key)
+    }
+
+    private func selectDate(at location: CGPoint, gridWidth: CGFloat) {
+        guard let date = date(at: location, gridWidth: gridWidth) else { return }
+        selectDuringDrag(date)
+    }
+
+    private func date(at location: CGPoint, gridWidth: CGFloat) -> Date? {
+        guard location.x >= 0, location.y >= 0 else { return nil }
+        let cellWidth = (gridWidth - gridSpacing * 6) / 7
+        let columnStride = cellWidth + gridSpacing
+        let rowStride = dateCellHeight + rowSpacing
+        let column = Int(location.x / columnStride)
+        let row = Int(location.y / rowStride)
+        guard column >= 0, column < 7, row >= 0 else { return nil }
+
+        let xInCell = location.x - CGFloat(column) * columnStride
+        let yInCell = location.y - CGFloat(row) * rowStride
+        guard xInCell <= cellWidth, yInCell <= dateCellHeight else { return nil }
+
+        let dateIndex = row * 7 + column - leadingBlankCount
+        guard monthDates.indices.contains(dateIndex) else { return nil }
+        return monthDates[dateIndex]
+    }
+}
+
+private struct LeaveDateCell: View {
+    var date: Date
+    var isSelected: Bool
+    var isToday: Bool
+
+    private var calendar: Calendar { .chinaAlarm }
+
+    var body: some View {
+        Text("\(calendar.component(.day, from: date))")
+            .font(.body.weight(isSelected || isToday ? .bold : .medium))
+            .monospacedDigit()
+            .foregroundStyle(isSelected ? .white : .primary)
+            .frame(maxWidth: .infinity)
+            .frame(height: 44)
+            .background(isSelected ? Color.green : Color(uiColor: .secondarySystemGroupedBackground))
+            .overlay {
+                if isToday && !isSelected {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(Color.orange, lineWidth: 2)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .contentShape(Rectangle())
     }
 }

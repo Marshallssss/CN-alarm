@@ -5,6 +5,7 @@ enum SeedDataService {
     static func seedIfNeeded(context: ModelContext) {
         seedSoundsIfNeeded(context: context)
         seedTemplatesIfNeeded(context: context)
+        seedProfilesIfNeeded(context: context)
         seedReminderRulesIfNeeded(context: context)
         seedHolidayDatasetIfNeeded(context: context)
     }
@@ -24,8 +25,56 @@ enum SeedDataService {
     private static func seedTemplatesIfNeeded(context: ModelContext) {
         let descriptor = FetchDescriptor<AlarmComboTemplate>()
         let existing = (try? context.fetch(descriptor)) ?? []
+        let existingNames = Set(existing.map(\.name))
+        for template in AlarmComboTemplate.defaultTemplates() where !existingNames.contains(template.name) {
+            context.insert(template)
+        }
+    }
+
+    private static func seedProfilesIfNeeded(context: ModelContext) {
+        let descriptor = FetchDescriptor<AlarmProfile>()
+        let existing = (try? context.fetch(descriptor)) ?? []
         guard existing.isEmpty else { return }
-        AlarmComboTemplate.defaultTemplates().forEach(context.insert)
+
+        let templates = (try? context.fetch(FetchDescriptor<AlarmComboTemplate>())) ?? []
+        let ddlTemplate = templates.first { $0.name == "DDL 倒推" }
+        let threeStepTemplate = templates.first { $0.name == "三段叫醒" }
+        let createdAt = Date()
+
+        context.insert(AlarmProfile(
+            label: "起床闹铃",
+            mode: .combo,
+            isEnabled: false,
+            hour: 8,
+            minute: 10,
+            allowSnooze: ddlTemplate?.allowSnooze ?? true,
+            soundIdentifier: ddlTemplate?.defaultSoundIdentifier ?? SoundLibrary.defaultSoundIdentifier,
+            comboTemplateID: ddlTemplate?.id,
+            comboAnchorMode: ddlTemplate?.anchorMode ?? .lastRingIsDeadline,
+            comboOffsets: ddlTemplate?.offsets ?? [-10, -5, 0],
+            createdAt: createdAt
+        ))
+        context.insert(AlarmProfile(
+            label: "门禁打卡",
+            mode: .single,
+            isEnabled: false,
+            hour: 8,
+            minute: 57,
+            createdAt: createdAt.addingTimeInterval(1)
+        ))
+        context.insert(AlarmProfile(
+            label: "午休结束",
+            mode: .combo,
+            isEnabled: false,
+            hour: 13,
+            minute: 57,
+            allowSnooze: threeStepTemplate?.allowSnooze ?? true,
+            soundIdentifier: threeStepTemplate?.defaultSoundIdentifier ?? SoundLibrary.defaultSoundIdentifier,
+            comboTemplateID: threeStepTemplate?.id,
+            comboAnchorMode: threeStepTemplate?.anchorMode ?? .firstRingIsDeadline,
+            comboOffsets: threeStepTemplate?.offsets ?? [0, 5, 10],
+            createdAt: createdAt.addingTimeInterval(2)
+        ))
     }
 
     private static func seedReminderRulesIfNeeded(context: ModelContext) {

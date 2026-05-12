@@ -126,9 +126,7 @@ enum NotificationActionApplier {
     static func applyPendingActions(context: ModelContext) {
         let actions = pendingActions()
         guard !actions.isEmpty else { return }
-        let profiles = (try? context.fetch(FetchDescriptor<AlarmProfile>())) ?? []
         let existing = (try? context.fetch(FetchDescriptor<CalendarException>())) ?? []
-        let targetProfileID = profiles.first?.id
         for action in actions {
             switch action.action {
             case .check, .snooze:
